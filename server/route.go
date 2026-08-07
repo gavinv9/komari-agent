@@ -2,10 +2,10 @@ package server
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -67,13 +67,18 @@ func executeRouteProbe(conn *ws.SafeConn, p v2.RouteParams) {
 	}
 
 	var hops []v2.RouteHop
+	var probeErr error
 	if p.IPVersion == 6 {
-		hops = traceRouteICMPv6(ctx, targetIP, p.MaxHops)
+		hops, probeErr = traceRouteICMPv6(ctx, targetIP, p.MaxHops)
 	} else {
-		hops = traceRouteICMPv4(ctx, targetIP, p.MaxHops)
+		hops, probeErr = traceRouteICMPv4(ctx, targetIP, p.MaxHops)
 	}
 
-	sendRouteResult(conn, p, hops, "")
+	errText := ""
+	if probeErr != nil {
+		errText = probeErr.Error()
+	}
+	sendRouteResult(conn, p, hops, errText)
 }
 
 func sendRouteResult(conn *ws.SafeConn, p v2.RouteParams, hops []v2.RouteHop, probeErr string) {
@@ -133,237 +138,137 @@ func resolveRouteTarget(target string, ipVersion int) (string, error) {
 
 // ---------- IPv4 traceroute ----------
 
-func traceRouteICMPv4(ctx context.Context, target string, maxHops int) []v2.RouteHop {
+func traceRouteICMPv4(ctx context.Context, target string, maxHops int) ([]v2.RouteHop, error) {
 	targetIP := net.ParseIP(target)
 	if targetIP == nil {
-		return nil
+		return nil, fmt.Errorf("invalid IPv4 target %q", target)
 	}
 
-	recvSock, err := net.ListenPacket("ip4:icmp", "0.0.0.0")
+	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
-		log.Printf("route: failed to listen ICMP: %v", err)
-		return nil
+		return nil, fmt.Errorf("open built-in ICMP route probe (root/CAP_NET_RAW may be required): %w", err)
 	}
-	defer recvSock.Close()
-	_ = recvSock.SetDeadline(time.Now().Add(time.Duration(maxHops) * (routeHopTimeout + 200*time.Millisecond)))
+	defer conn.Close()
+	packet := conn.IPv4PacketConn()
+	if packet == nil {
+		return nil, fmt.Errorf("open built-in IPv4 route probe: packet connection is unavailable")
+	}
 
-	icmpID := uint16(time.Now().UnixNano() & 0xFFFF)
 	hops := make([]v2.RouteHop, 0, maxHops)
-
+	id := os.Getpid() & 0xffff
 	for ttl := 1; ttl <= maxHops; ttl++ {
 		select {
 		case <-ctx.Done():
-			return hops
+			return hops, nil
 		default:
 		}
 
-		seq := uint16(ttl)
-		sentAt := time.Now()
-		if err := sendICMPv4Probe(targetIP, icmpID, seq, ttl); err != nil {
+		if err := packet.SetTTL(ttl); err != nil {
+			return hops, fmt.Errorf("set IPv4 TTL: %w", err)
+		}
+		message := icmp.Message{Type: ipv4.ICMPTypeEcho, Code: 0, Body: &icmp.Echo{ID: id, Seq: ttl, Data: []byte("KOMARI-ROUTE")}}
+		payload, err := message.Marshal(nil)
+		if err != nil {
+			return hops, err
+		}
+		start := time.Now()
+		_ = conn.SetDeadline(start.Add(routeHopTimeout))
+		if _, err := conn.WriteTo(payload, &net.IPAddr{IP: targetIP}); err != nil {
+			return hops, fmt.Errorf("send IPv4 route probe: %w", err)
+		}
+		buffer := make([]byte, 1500)
+		n, peer, err := conn.ReadFrom(buffer)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				hops = append(hops, v2.RouteHop{TTL: ttl, Timeout: true})
+				continue
+			}
+			return hops, fmt.Errorf("read IPv4 route probe: %w", err)
+		}
+		reply, err := icmp.ParseMessage(1, buffer[:n])
+		if err != nil {
 			hops = append(hops, v2.RouteHop{TTL: ttl, Timeout: true})
 			continue
 		}
-
-		ip, rtt, matched := recvICMPv4Response(recvSock, icmpID, routeHopTimeout, sentAt)
-		if matched {
-			hops = append(hops, v2.RouteHop{TTL: ttl, IP: ip, LatencyMS: float64(rtt.Milliseconds())})
-			if ip == target {
-				return hops
-			}
-		} else {
-			hops = append(hops, v2.RouteHop{TTL: ttl, Timeout: true})
+		ip := routePeerIP(peer)
+		hops = append(hops, v2.RouteHop{TTL: ttl, IP: ip, LatencyMS: float64(time.Since(start).Microseconds()) / 1000})
+		if reply.Type == ipv4.ICMPTypeEchoReply || net.ParseIP(ip).Equal(targetIP) {
+			break
 		}
 	}
-	return hops
+	return hops, nil
 }
 
-func sendICMPv4Probe(target net.IP, icmpID, seq uint16, ttl int) error {
-	sock, err := net.Dial("ip4:icmp", target.String())
-	if err != nil {
-		return err
+func routePeerIP(addr net.Addr) string {
+	switch value := addr.(type) {
+	case *net.IPAddr:
+		return value.IP.String()
+	case *net.UDPAddr:
+		return value.IP.String()
+	default:
+		return strings.Split(addr.String(), "%")[0]
 	}
-	defer sock.Close()
-
-	c := ipv4.NewConn(sock)
-	if err := c.SetTTL(ttl); err != nil {
-		return err
-	}
-
-	msg := icmp.Message{
-		Type: ipv4.ICMPTypeEcho, Code: 0,
-		Body: &icmp.Echo{ID: int(icmpID), Seq: int(seq), Data: []byte("KOMARI-ROUTE")},
-	}
-	data, err := msg.Marshal(nil)
-	if err != nil {
-		return err
-	}
-	_, err = sock.Write(data)
-	return err
-}
-
-func recvICMPv4Response(sock net.PacketConn, icmpID uint16, timeout time.Duration, sentAt time.Time) (string, time.Duration, bool) {
-	_ = sock.SetDeadline(time.Now().Add(timeout))
-	buf := make([]byte, 1500)
-	for {
-		n, _, err := sock.ReadFrom(buf)
-		if err != nil {
-			return "", 0, false
-		}
-		rtt := time.Since(sentAt)
-		msg, err := icmp.ParseMessage(1, buf[:n])
-		if err != nil {
-			continue
-		}
-		switch msg.Type {
-		case ipv4.ICMPTypeTimeExceeded:
-			if ip, ok := matchEmbeddedICMPID(msg.Body, icmpID); ok {
-				return ip, rtt, true
-			}
-		case ipv4.ICMPTypeDestinationUnreachable:
-			if ip, ok := matchEmbeddedICMPID(msg.Body, icmpID); ok {
-				return ip, rtt, true
-			}
-		case ipv4.ICMPTypeEchoReply:
-			if echo, ok := msg.Body.(*icmp.Echo); ok && echo.ID == int(icmpID) {
-				return "", rtt, true
-			}
-		}
-	}
-}
-
-func matchEmbeddedICMPID(body icmp.MessageBody, expectedID uint16) (string, bool) {
-	rawBody, ok := body.(*icmp.RawBody)
-	if !ok {
-		return "", false
-	}
-	data := rawBody.Data
-	// IPv4 header (>=20 bytes) + first 8 bytes of ICMP Echo (type, code, checksum, id, seq)
-	if len(data) < 28 {
-		return "", false
-	}
-	ihl := int(data[0]&0x0F) * 4
-	if ihl < 20 || len(data) < ihl+8 {
-		return "", false
-	}
-	embeddedID := binary.BigEndian.Uint16(data[ihl+4 : ihl+6])
-	if embeddedID != expectedID {
-		return "", false
-	}
-	srcIP := net.IP(make([]byte, 4))
-	copy(srcIP, data[12:16])
-	return srcIP.String(), true
 }
 
 // ---------- IPv6 traceroute ----------
 
-func traceRouteICMPv6(ctx context.Context, target string, maxHops int) []v2.RouteHop {
+func traceRouteICMPv6(ctx context.Context, target string, maxHops int) ([]v2.RouteHop, error) {
 	targetIP := net.ParseIP(target)
 	if targetIP == nil {
-		return nil
+		return nil, fmt.Errorf("invalid IPv6 target %q", target)
 	}
 
-	recvSock, err := net.ListenPacket("ip6:ipv6-icmp", "::")
+	conn, err := icmp.ListenPacket("ip6:ipv6-icmp", "::")
 	if err != nil {
-		log.Printf("route: failed to listen ICMPv6: %v", err)
-		return nil
+		return nil, fmt.Errorf("open built-in IPv6 ICMP route probe (root/CAP_NET_RAW may be required): %w", err)
 	}
-	defer recvSock.Close()
-	_ = recvSock.SetDeadline(time.Now().Add(time.Duration(maxHops) * (routeHopTimeout + 200*time.Millisecond)))
+	defer conn.Close()
+	packet := conn.IPv6PacketConn()
+	if packet == nil {
+		return nil, fmt.Errorf("open built-in IPv6 route probe: packet connection is unavailable")
+	}
 
-	icmpID := uint16(time.Now().UnixNano() & 0xFFFF)
 	hops := make([]v2.RouteHop, 0, maxHops)
-
+	id := os.Getpid() & 0xffff
 	for ttl := 1; ttl <= maxHops; ttl++ {
 		select {
 		case <-ctx.Done():
-			return hops
+			return hops, nil
 		default:
 		}
 
-		seq := uint16(ttl)
-		sentAt := time.Now()
-		if err := sendICMPv6Probe(targetIP, icmpID, seq, ttl); err != nil {
+		if err := packet.SetHopLimit(ttl); err != nil {
+			return hops, fmt.Errorf("set IPv6 hop limit: %w", err)
+		}
+		message := icmp.Message{Type: ipv6.ICMPTypeEchoRequest, Code: 0, Body: &icmp.Echo{ID: id, Seq: ttl, Data: []byte("KOMARI-ROUTE")}}
+		payload, err := message.Marshal(nil)
+		if err != nil {
+			return hops, err
+		}
+		start := time.Now()
+		_ = conn.SetDeadline(start.Add(routeHopTimeout))
+		if _, err := conn.WriteTo(payload, &net.IPAddr{IP: targetIP}); err != nil {
+			return hops, fmt.Errorf("send IPv6 route probe: %w", err)
+		}
+		buffer := make([]byte, 1500)
+		n, peer, err := conn.ReadFrom(buffer)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				hops = append(hops, v2.RouteHop{TTL: ttl, Timeout: true})
+				continue
+			}
+			return hops, fmt.Errorf("read IPv6 route probe: %w", err)
+		}
+		reply, err := icmp.ParseMessage(58, buffer[:n])
+		if err != nil {
 			hops = append(hops, v2.RouteHop{TTL: ttl, Timeout: true})
 			continue
 		}
-
-		ip, rtt, matched := recvICMPv6Response(recvSock, icmpID, routeHopTimeout, sentAt)
-		if matched {
-			hops = append(hops, v2.RouteHop{TTL: ttl, IP: ip, LatencyMS: float64(rtt.Milliseconds())})
-			if ip == target {
-				return hops
-			}
-		} else {
-			hops = append(hops, v2.RouteHop{TTL: ttl, Timeout: true})
+		ip := routePeerIP(peer)
+		hops = append(hops, v2.RouteHop{TTL: ttl, IP: ip, LatencyMS: float64(time.Since(start).Microseconds()) / 1000})
+		if reply.Type == ipv6.ICMPTypeEchoReply || net.ParseIP(ip).Equal(targetIP) {
+			break
 		}
 	}
-	return hops
-}
-
-func sendICMPv6Probe(target net.IP, icmpID, seq uint16, ttl int) error {
-	sock, err := net.Dial("ip6:ipv6-icmp", target.String())
-	if err != nil {
-		return err
-	}
-	defer sock.Close()
-
-	c := ipv6.NewConn(sock)
-	if err := c.SetHopLimit(ttl); err != nil {
-		return err
-	}
-
-	msg := icmp.Message{
-		Type: ipv6.ICMPTypeEchoRequest, Code: 0,
-		Body: &icmp.Echo{ID: int(icmpID), Seq: int(seq), Data: []byte("KOMARI-ROUTE")},
-	}
-	data, err := msg.Marshal(nil)
-	if err != nil {
-		return err
-	}
-	_, err = sock.Write(data)
-	return err
-}
-
-func recvICMPv6Response(sock net.PacketConn, icmpID uint16, timeout time.Duration, sentAt time.Time) (string, time.Duration, bool) {
-	_ = sock.SetDeadline(time.Now().Add(timeout))
-	buf := make([]byte, 1500)
-	for {
-		n, from, err := sock.ReadFrom(buf)
-		if err != nil {
-			return "", 0, false
-		}
-		rtt := time.Since(sentAt)
-		msg, err := icmp.ParseMessage(58, buf[:n])
-		if err != nil {
-			continue
-		}
-		switch msg.Type {
-		case ipv6.ICMPTypeTimeExceeded:
-			if matchEmbeddedICMPv6ID(msg.Body, icmpID) {
-				return from.String(), rtt, true
-			}
-		case ipv6.ICMPTypeDestinationUnreachable:
-			if matchEmbeddedICMPv6ID(msg.Body, icmpID) {
-				return from.String(), rtt, true
-			}
-		case ipv6.ICMPTypeEchoReply:
-			if echo, ok := msg.Body.(*icmp.Echo); ok && echo.ID == int(icmpID) {
-				return from.String(), rtt, true
-			}
-		}
-	}
-}
-
-func matchEmbeddedICMPv6ID(body icmp.MessageBody, expectedID uint16) bool {
-	rawBody, ok := body.(*icmp.RawBody)
-	if !ok {
-		return false
-	}
-	data := rawBody.Data
-	// IPv6 header (40 bytes) + first 8 bytes of ICMPv6 Echo (type, code, checksum, id, seq)
-	if len(data) < 48 {
-		return false
-	}
-	embeddedID := binary.BigEndian.Uint16(data[44:46])
-	return embeddedID == expectedID
+	return hops, nil
 }

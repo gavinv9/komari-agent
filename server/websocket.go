@@ -25,10 +25,13 @@ import (
 )
 
 var (
-	v2AckMu       sync.Mutex
-	v2AckEventIDs []string
-	v2SeenEvents  = make(map[string]struct{})
+	v2AckMu        sync.Mutex
+	v2AckEventIDs  []string
+	v2SeenEvents   = make(map[string]struct{})
+	v2SeenEventIDs []string
 )
+
+const v2SeenEventLimit = 512
 
 // rebuildTicker 重建 ticker 以应用新的上报间隔。
 // 若间隔未变化则返回原 ticker 和间隔不变。
@@ -374,7 +377,28 @@ func markV2EventSeen(id string) bool {
 		return false
 	}
 	v2SeenEvents[id] = struct{}{}
+	v2SeenEventIDs = append(v2SeenEventIDs, id)
+	if len(v2SeenEventIDs) > v2SeenEventLimit {
+		oldest := v2SeenEventIDs[0]
+		v2SeenEventIDs = v2SeenEventIDs[1:]
+		delete(v2SeenEvents, oldest)
+	}
 	return true
+}
+
+func forgetV2Event(id string) {
+	if id == "" {
+		return
+	}
+	v2AckMu.Lock()
+	defer v2AckMu.Unlock()
+	delete(v2SeenEvents, id)
+	for i, seenID := range v2SeenEventIDs {
+		if seenID == id {
+			v2SeenEventIDs = append(v2SeenEventIDs[:i], v2SeenEventIDs[i+1:]...)
+			break
+		}
+	}
 }
 
 func connectWebSocket(websocketEndpoint string) (*ws.SafeConn, error) {
@@ -489,6 +513,8 @@ func processV2Event(conn *ws.SafeConn, method string, params interface{}, eventI
 			return true
 		} else {
 			log.Printf("bad v2 config params: %v", err)
+			// bind 失败时撤销 seen 标记，允许服务端重发后再次尝试
+			forgetV2Event(eventID)
 		}
 	case v2.MethodAgentRoute:
 		handleAgentRoute(conn, params)
