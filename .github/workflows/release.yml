@@ -44,7 +44,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
-          VERSION: ${{ github.event.release.tag_name || github.ref_name }}
+          VERSION: ${{ github.ref_name }}
         run: |
           BINARY_NAME=komari-agent-${{ matrix.goos }}-${{ matrix.goarch }}
           if [ "${{ matrix.goos }}" = "windows" ]; then
@@ -65,7 +65,10 @@ jobs:
           elif [ "${{ matrix.goos }}" = "darwin" ]; then
             true
           fi
-          gh release upload ${{ github.event.release.tag_name || github.ref_name }} $BINARY_NAME --repo ${{ github.repository }}
+          # Create release if it doesn't exist (for push tag triggers)
+          gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" --generate-notes --prerelease=false 2>/dev/null || true
+          # Upload the binary as a release asset
+          gh release upload "${{ github.ref_name }}" $BINARY_NAME --repo "${{ github.repository }}" --clobber
         shell: bash
 
   generate-checksums:
@@ -79,7 +82,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release download ${{ github.event.release.tag_name || github.ref_name }} --repo ${{ github.repository }} --pattern "komari-agent-*"
+          gh release download "${{ github.ref_name }}" --repo "${{ github.repository }}" --pattern "komari-agent-*"
 
       - name: Generate checksums
         run: |
@@ -90,4 +93,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload ${{ github.event.release.tag_name || github.ref_name }} checksums.txt --repo ${{ github.repository }}
+          # Create release if it doesn't exist (for push tag triggers)
+          gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" --generate-notes --prerelease=false 2>/dev/null || true
+          # Upload checksums as a release asset
+          gh release upload "${{ github.ref_name }}" checksums.txt --repo "${{ github.repository }}" --clobber
