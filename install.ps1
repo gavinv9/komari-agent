@@ -14,7 +14,7 @@ $ServiceName = "komari-agent"
 $GitHubProxy = ""
 $KomariArgs = @()
 $InstallVersion = ""
-$InstallRepo = "komari-monitor/komari-agent"
+$InstallRepo = "gavinv9/komari-agent"
 
 # Parse script arguments
 for ($i = 0; $i -lt $args.Count; $i++) {
@@ -30,7 +30,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
 
 # Validate InstallRepo format: must be owner/repo (alphanumeric, dot, hyphen, underscore)
 if ($InstallRepo -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$') {
-    Log-Error "Invalid --install-repo value: '$InstallRepo'. Must match owner/repo format (e.g. komari-monitor/komari-agent)."
+    Log-Error "Invalid --install-repo value: '$InstallRepo'. Must match owner/repo format (e.g. gavinv9/komari-agent)."
     exit 1
 }
 

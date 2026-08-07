@@ -73,7 +73,7 @@ export AGENT_TOKEN="your-token"
 
 ## 自定义更新仓库
 
-默认情况下 Agent 从 `komari-monitor/komari-agent` 检查更新。如需指向 Fork 或私有仓库，可通过以下方式配置：
+默认情况下 Agent 从 `gavinv9/komari-agent` 检查更新。如需指向 Fork 或私有仓库，可通过以下方式配置：
 
 - 命令行：`--update-repo myorg/myagent`
 - 环境变量：`AGENT_UPDATE_REPO=myorg/myagent`
@@ -85,7 +85,7 @@ export AGENT_TOKEN="your-token"
 wget -qO- https://raw.githubusercontent.com/myorg/myagent/refs/heads/main/install.sh | sudo bash -s -- --install-repo myorg/myagent -e https://panel.example.com -t your-token
 ```
 
-> 安装脚本默认从原版仓库 `komari-monitor/komari-agent` 下载二进制。
+> 安装脚本默认从原版仓库 `gavinv9/komari-agent` 下载二进制。
 
 > 仓库 slug 必须匹配 `owner/repo` 格式（仅允许字母、数字、点、连字符、下划线），无效值会被拒绝。
 
@@ -125,7 +125,7 @@ Stage 2 将使用 GPG 签名验证 `checksums.txt` 的真实性，防止攻击�
    gpg --armor --export-secret-keys YOUR_KEY_ID > private.key
    ```
 2. 私钥存入 GitHub Secrets：
-   - 仓库：`komari-monitor/komari-agent`
+   - 仓库：`gavinv9/komari-agent`
    - 路径：Settings → Secrets and variables → Actions → New repository secret
    - Name: `GPG_PRIVATE_KEY`
    - Value: `private.key` 的完整内容
@@ -137,7 +137,7 @@ Stage 2 将使用 GPG 签名验证 `checksums.txt` 的真实性，防止攻击�
 
 | 用途 | 地址 | 触发方式 |
 |---|---|---|
-| 自更新 | `api.github.com`（默认 `komari-monitor/komari-agent`） | 定时检查 |
+| 自更新 | `api.github.com`（默认 `gavinv9/komari-agent`） | 定时检查 |
 | IPv4 检测 | `visa.cn/cdn-cgi/trace`、`qualcomm.cn/cdn-cgi/trace`、`toutiao.com/...`、`edge-ip.html.zone/geo`、`vercel-ip.html.zone/geo`、`ipv4.ip.sb`、`api.ipify.org` | 启动时多源冗余 |
 | IPv6 检测 | `v6.ip.zxinc.org`、`api6.ipify.org`、`ipv6.icanhazip.com`、`api-ipv6.ip.sb` | 启动时多源冗余 |
 | 卸载帮助 | `komari-document.pages.dev/faq/uninstall.html` | Windows 弹窗 |

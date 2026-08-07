@@ -40,7 +40,7 @@ service_name="komari-agent"
 target_dir="/opt/komari"
 github_proxy=""
 install_version="" # New parameter for specifying version
-install_repo="komari-monitor/komari-agent" # Default GitHub repo slug
+install_repo="gavinv9/komari-agent" # Default GitHub repo slug
 install_dir_specified=false
 service_user="${SUDO_USER:-$(id -un)}"
 user_service=false
@@ -116,7 +116,7 @@ komari_args="${komari_args# }"
 
 # Validate install_repo format: must be owner/repo (alphanumeric, dot, hyphen, underscore)
 if ! echo "$install_repo" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*$'; then
-    log_error "Invalid --install-repo value: '$install_repo'. Must match owner/repo format (e.g. komari-monitor/komari-agent)."
+    log_error "Invalid --install-repo value: '$install_repo'. Must match owner/repo format (e.g. gavinv9/komari-agent)."
     exit 1
 fi
 

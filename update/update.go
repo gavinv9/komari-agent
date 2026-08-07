@@ -21,7 +21,7 @@ import (
 
 var (
 	CurrentVersion string = "0.0.1"
-	Repo           string = "komari-monitor/komari-agent"
+	Repo           string = "gavinv9/komari-agent"
 )
 
 // repoSlugRe validates GitHub repository slugs: owner/name
